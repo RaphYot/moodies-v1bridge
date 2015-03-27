@@ -1,1 +1,1 @@
-bridge: python v1Bridge.py -d -p $PORT
+web: python v1Bridge.py -d -p 80
