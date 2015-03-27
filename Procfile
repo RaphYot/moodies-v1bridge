@@ -1,1 +1,1 @@
-web: python v1Bridge.py -v -p 5000
+web: python v1Bridge.py -v -p $PORT
