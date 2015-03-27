@@ -8,6 +8,44 @@ import types
 
 import pusherclient
 
+class V1Button:
+
+    def __init__(self, name, user_id):
+        self.logger = logging.getLogger('moodies.V1Button')
+        self.name = name
+        self.user_id = user_id
+        self.conn = None
+        self.queue = None
+        self.connected = False
+
+    def connect(self, conn, queue):
+        self.conn = conn
+        self.queue = queue
+        self.connected = True
+
+    def listen(self):
+        self.logger.info('Starting listening mode of new HW - {}'.format(self.name))
+        while self.connected:
+            try:
+                data = self.conn.recv(1024)
+                if not data:
+                    raise socket.error('No data, connection closed?')
+                self._handle(data.strip())
+            except socket.timeout:
+                self.logger.debug('Got a socket timeout in conn.recv for {}'.format(self.name))
+                continue
+            except socket.error:
+                self.logger.error('Got a socket error in conn.recv for {}'.format(self.name))
+                break
+        self.conn.close()
+        self.connected = False
+        self.logger.info('Hardware {} socket closed'.format(self.name))
+
+    def _handle(self, data):
+        self.logger.info('Hardware {} received data: {}'.format(self.name, data))
+        self.queue.put(Message(event_type='debug', user_id=self.user_id, value=data))
+
+
 # Configuration
 SLEEPTIME=1
 APPKEY = '2c987384b72778026687'
@@ -19,10 +57,7 @@ USERDATA = {
     }
 }
 HARDWARE = {
-    '1': {
-        'name': 'telnet-test'
-        , 'user_id': 'debug'
-    }
+    '1': V1Button('button_debug', 'user_debug')
 }
 
 
@@ -38,7 +73,6 @@ class MoodiesBridge:
         self.logger.info('Starting Moodies v1Bridge server')
         self.killed = False
         self.pusher = None
-        self.connected_hardware = []
         self.queue = Queue()
         self.port = port
 
@@ -76,24 +110,31 @@ class MoodiesBridge:
         """
         Start the communication with the new hardware by sending "ID"
         Expect new hardware to send it's ID, if not, close the connection
-        Store the new hardware in self.connected_hardware
         """
-        if trial > 3:
+        def close_conn(conn, message):
+            conn.send(message)
+            conn.close()
             return False
 
-        conn.sendall('ID\n')
-        data = conn.recv(256)
+        if trial > 2:
+            return close_conn(conn, 'NO ID RECEIVED')
+
+        try:
+            conn.sendall('ID\n')
+            data = conn.recv(256)
+        except (socket.timeout, socket.error) as e:
+            self.logger.debug('Error while waiting ID: {}'.format(e))
+            return False
+
         if data[:2]=='ID':
             hw_id = data[3:].strip()
             if hw_id in HARDWARE:
-                hw_info = HARDWARE[hw_id]
-                # TODO we should reuse known hardware here, and use a reconnect function in new_but
-                new_but = V1Button(hw_info, conn, self.queue)
-                self.connected_hardware.append(new_but)
-                return new_but
+                hw = HARDWARE[hw_id]
+                hw.connect(conn, self.queue)
+                return hw
             else:
                 self.logger.error('ERROR in _create_hw: Hardware {} at {} is not in DB!'.format(hw_id, addr))
-                return False
+                return close_conn(conn, 'UNAUTHORIZED')
         else:
             self.logger.error('Message {} was invalid for {}: {}'.format(trial, addr, data))
             return self._create_hw(conn, addr, trial+1)
@@ -146,34 +187,6 @@ class MoodiesBridge:
             message = self.queue.get()
             self.logger.info('Got new message from hw thread: {} - {}'.format(message.event_type, message.to_dict()))
             self.pusher_channel.trigger(message.event_type, message.to_dict())
-
-class V1Button:
-
-    def __init__(self, info, conn, queue):
-        self.logger = logging.getLogger('moodies.V1Button')
-        self.info = info
-        self.conn = conn
-        self.queue = queue
-        self.killed = False
-
-    def listen(self):
-        self.logger.info('Starting listening mode of new HW - {}'.format(self.info['name']))
-        while not self.killed:
-            try:
-                data = self.conn.recv(1024)
-                self._handle(data.strip())
-            except socket.timeout:
-                self.logger.debug('Got a socket timeout in conn.recv for {}'.format(self.info['name']))
-                continue
-            except socket.error:
-                self.logger.error('Got a socket error in conn.recv for {}'.format(self.info['name']))
-                break
-        self.logger.info('Hardware {} socket closed, killing'.format(self.info['name']))
-
-    def _handle(self, data):
-        self.logger.info('Hardware {} received data: {}'.format(self.info['name'], data))
-        self.queue.put(Message(event_type='debug', user_id=self.info['user_id'], value=data))
-
 
 class Message:
 
