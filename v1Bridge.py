@@ -1,6 +1,7 @@
 import json
 import logging
 from multiprocessing import Queue
+import os
 import socket
 import sys
 from threading import Thread
@@ -250,20 +251,14 @@ def parse_args():
         dest='loglevel',
         const=logging.INFO
     )
-    parser.add_argument('-p','--port',
-        help='Web socket port',
-        action='store',
-        type=int,
-        dest='port'
-    )
     args = parser.parse_args()
     return args
 
-def main(args):
-    moodies_bridge = MoodiesBridge(args.port)
+def main():
+    moodies_bridge = MoodiesBridge(port = int(os.environ.get('PORT', 5000)) )
     moodies_bridge.start()
 
 if __name__=='__main__':
     args = parse_args()
     start_logger(args)
-    main(args)
+    main()
