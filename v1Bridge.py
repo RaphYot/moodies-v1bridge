@@ -255,7 +255,7 @@ def parse_args():
     return args
 
 def main():
-    moodies_bridge = MoodiesBridge(port = int(os.environ.get('PORT', 5000)) )
+    moodies_bridge = MoodiesBridge(port = int(os.environ.get('PORT', 4123)) )
     moodies_bridge.start()
 
 if __name__=='__main__':
