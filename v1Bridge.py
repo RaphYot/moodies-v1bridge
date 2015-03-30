@@ -164,7 +164,7 @@ class MoodiesBridge:
     """
 
     def __init__(self, port):
-        self.logger = logging.getLogger()
+        self.logger = logging.getLogger('MoodiesBridge')
         self.logger.info('Starting Moodies v1Bridge server')
         self.killed = False
         self.port = port
