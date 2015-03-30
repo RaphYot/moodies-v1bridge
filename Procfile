@@ -1,1 +1,1 @@
-bridge: python v1Bridge.py -v
+bridge: ./v1Bridge.py -v
