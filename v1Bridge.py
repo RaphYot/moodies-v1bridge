@@ -20,7 +20,7 @@ class V1Button:
         self.connected = False
 
     def connect(self, conn):
-        conn.settimeout(10)
+        conn.settimeout(60)
         self.conn = conn
         self._connect_to_pusher()
         self.connected = True

@@ -1,1 +1,1 @@
-web: python v1Bridge.py -d
+bridge: python v1Bridge.py -v
