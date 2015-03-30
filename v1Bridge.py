@@ -12,16 +12,17 @@ import pusherclient
 class V1Button:
 
     def __init__(self, name, user_id):
-        self.logger = logging.getLogger('moodies.V1Button')
+        self.logger = logging.getLogger('moodies.V1Button.{}'.format(user_id))
         self.name = name
         self.user_id = user_id
         self.conn = None
-        self.queue = None
+        self.pusher = None
         self.connected = False
 
-    def connect(self, conn, queue):
+    def connect(self, conn):
+        conn.settimeout(10)
         self.conn = conn
-        self.queue = queue
+        self._connect_to_pusher()
         self.connected = True
 
     def listen(self):
@@ -31,58 +32,145 @@ class V1Button:
                 data = self.conn.recv(1024)
                 if not data:
                     raise socket.error('No data, connection closed?')
-                self._handle(data.strip())
+                self._handle_tcp_data(data.strip())
             except socket.timeout:
                 self.logger.debug('Got a socket timeout in conn.recv for {}'.format(self.name))
-                continue
+                if not self._test_connection():
+                    self.logger.error('Test connection failed')
+                    break
             except socket.error:
                 self.logger.error('Got a socket error in conn.recv for {}'.format(self.name))
                 break
-        self.conn.close()
-        self.connected = False
-        self.logger.info('Hardware {} socket closed'.format(self.name))
+            except Exception as e:
+                # Need to close the connection, so catchall
+                self.logger.exception('Got an uncatched error, {}'.format(e))
+                break
+        self.disconnect()
 
-    def _handle(self, data):
+    def disconnect(self):
+        self.connected = False
+        self.conn.close()
+        self.logger.info('Hardware {} socket closed'.format(self.name))
+        self.pusher.disconnect()
+        self.logger.info('Hardware {} disconnected from pusher'.format(self.name))
+
+    def send(self, msg):
+        try:
+            self.conn.sendall(msg)
+        except socket.error:
+             self.logger.error("Socket connection issue, killing {}".format(self._id))
+             self.disconnect()
+
+    def _test_connection(self):
+        try:
+            self.conn.send('ID\n')
+            data = self.conn.recv(256)
+        except (socket.timeout, socket.error) as e:
+            self.logger.debug('Error while waiting ID: {}'.format(e))
+            return False
+        return data[:2]=='ID'
+
+    def _handle_tcp_data(self, data):
         self.logger.info('Hardware {} received data: {}'.format(self.name, data))
-        self.queue.put(Message(event_type='debug', user_id=self.user_id, value=data))
+        if data.split(' ')[0] == 'BP':
+            self.logger.info('Sending client-button-pushed to pusher')
+            message = Message(event_type='client-button-pushed', user_id=self.user_id, value=data.split()[1])
+            self.pusher_channel.trigger(message.event_type, message.to_dict())
+
+
+    def _connect_to_pusher(self):
+        """
+        Establish the connection to pusher, and configure the callback function
+        once connected
+        """
+        USERDATA = {
+          'user_id': self.user_id,
+          'user_info': {
+              'name': self.name
+            }
+        }
+        self.pusher = pusherclient.Pusher(APPKEY, secret=SECRET, user_data=USERDATA)
+        self.pusher.connection.bind('pusher:connection_established', self._callback_connection_estabished)
+        self.pusher.connect()
+        self.logger.info('Pusher connection established')
+
+    def _callback_connection_estabished(self, data):
+        """
+        Callback to subribe to channels when receiving pusher:connection_established,
+        needed as we can't subscribe until we are connected.
+        """
+        self.logger.debug('Callback pusher:connection_established - {}'.format(data))
+        self.pusher_channel = self.pusher.subscribe('presence-moodies')
+        self._setup_pusher_channel_callbacks()
+
+    def _setup_pusher_channel_callbacks(self):
+        """
+        Configure the config channel callbacks
+        """
+        self.pusher_channel.bind('pusher_internal:member_added', self._callback_joining_member)
+        self.pusher_channel.bind('pusher_internal:member_removed', self._callback_leaving_member)
+        self.pusher_channel.bind('client-play-melody', self._callback_play_melody)
+        self.pusher_channel.bind('client-new-color', self._callback_new_color)
+        self.pusher_channel.bind('client-text-message', self._callback_text_message)
+
+    def _callback_play_melody(self, msg):
+        message = Message()
+        message.feed_with_json(msg)
+        self.logger.debug('Play melody: {}'.format(message.value))
+        self.send('PM {}\n'.format(message.value))
+
+    def _callback_new_color(self, msg):
+        message = Message()
+        message.feed_with_json(msg)
+        self.logger.debug('New color: {}'.format(message.value))
+        self.send('BC {}\n'.format(message.value))
+
+    def _callback_text_message(self, msg):
+        message = Message()
+        message.feed_with_json(msg)
+        self.logger.debug('Text message: {}'.format(message.value))
+        self.send('DT {}\n'.format(message.value.upper()))
+
+    def _callback_joining_member(self, msg):
+        """
+        Create a new MoodiesUser and store it for the first time we see the user.
+        Append the user to the channel list of users.
+        """
+        pass
+
+    def _callback_leaving_member(self, msg):
+        """
+        Remove users from channel users list.
+        """
+        pass
 
 
 # Configuration
 SLEEPTIME=1
 APPKEY = '2c987384b72778026687'
 SECRET = '8440acd6ba1e0bfec3d4'
-USERDATA = {
-  'user_id': 'moodies-v1Bridge',
-  'user_info': {
-      'name': 'Moodies v1Bridge'
-    }
-}
+
 HARDWARE = {
-    '1': V1Button('button_debug', 'user_debug')
+    '1': V1Button('button_debug', 'user_debug'),
+    '5261706872': V1Button('button_did', 'dcolens')
 }
 
 
 class MoodiesBridge:
 
     """
-    Connect to pusher and open a socket connection to listen to moodiesV1 prototypes buttons.
-    Forward pusher messages to the buttons, and buttons messages to pusher.
+    Open a socket connection to listen to moodiesV1 prototypes buttons.
+    And create a new button when a new HW register.
     """
 
     def __init__(self, port):
-        self.logger = logging.getLogger('moodies.MoodiesBridge')
+        self.logger = logging.getLogger()
         self.logger.info('Starting Moodies v1Bridge server')
         self.killed = False
-        self.pusher = None
-        self.queue = Queue()
         self.port = port
 
     def start(self):
-        self._connect_to_pusher()
         self._create_and_start_socket()
-        queue_thread = Thread(target=self._queue_worker)
-        queue_thread.daemon = True
-        queue_thread.start()
         self._socket_listerner_loop()
 
     def _create_and_start_socket(self):
@@ -131,7 +219,7 @@ class MoodiesBridge:
             hw_id = data[3:].strip()
             if hw_id in HARDWARE:
                 hw = HARDWARE[hw_id]
-                hw.connect(conn, self.queue)
+                hw.connect(conn)
                 return hw
             else:
                 self.logger.error('ERROR in _create_hw: Hardware {} at {} is not in DB!'.format(hw_id, addr))
@@ -139,55 +227,6 @@ class MoodiesBridge:
         else:
             self.logger.error('Message {} was invalid for {}: {}'.format(trial, addr, data))
             return self._create_hw(conn, addr, trial+1)
-
-    def _connect_to_pusher(self):
-        """
-        Establish the connection to pusher, and configure the callback function
-        once connected
-        """
-        self.pusher = pusherclient.Pusher(APPKEY, secret=SECRET, user_data=USERDATA)
-        self.pusher.connection.bind('pusher:connection_established', self._callback_connection_estabished)
-        self.pusher.connect()
-        self.logger.info('Pusher connection established')
-
-
-    def _callback_connection_estabished(self, data):
-        """
-        Callback to subribe to channels when receiving pusher:connection_established,
-        needed as we can't subscribe until we are connected.
-        """
-        self.logger.debug('Callback pusher:connection_established - {}'.format(data))
-        self.pusher_channel = self.pusher.subscribe('presence-moodies')
-        self._setup_pusher_channel_callbacks(self.pusher_channel)
-
-    def _setup_pusher_channel_callbacks(self, pusher_channel):
-        """
-        Configure the config channel callbacks
-        """
-        pusher_channel.bind('pusher_internal:member_added', self._callback_joining_member)
-        pusher_channel.bind('pusher_internal:member_removed', self._callback_leaving_member)
-
-    def _callback_joining_member(self, msg, channel_name):
-        """
-        Create a new MoodiesUser and store it for the first time we see the user.
-        Append the user to the channel list of users.
-        """
-        self.logger.debug('{} joined channel'.format(msg.user_id))
-
-    def _callback_leaving_member(self, msg, channel_name):
-        """
-        Remove users from channel users list.
-        """
-        self.logger.debug('{} left channel'.format(msg.user_id))
-
-    def _queue_worker(self):
-        """
-        Dequeue the message from thread queue and process them
-        """
-        while not self.killed:
-            message = self.queue.get()
-            self.logger.info('Got new message from hw thread: {} - {}'.format(message.event_type, message.to_dict()))
-            self.pusher_channel.trigger(message.event_type, message.to_dict())
 
 class Message:
 
@@ -219,11 +258,11 @@ class Message:
             return None
 
 def start_logger(args):
-    module_logger = logging.getLogger('moodies')
+    module_logger = logging.getLogger()
     #formatter = logging.Formatter('%(asctime)s - %(name)s.%(lineno)d - %(levelname)s - %(message)s')
     formatter = logging.Formatter('[%(levelname)8s] %(name)s.%(lineno)d --- %(message)s')
-    ch = logging.StreamHandler(sys.stdout)
 
+    ch = logging.StreamHandler(sys.stdout)
     ch.setFormatter(formatter)
     module_logger.addHandler(ch)
 
@@ -255,7 +294,8 @@ def parse_args():
     return args
 
 def main():
-    moodies_bridge = MoodiesBridge(port = int(os.environ.get('PORT', 4123)) )
+    #moodies_bridge = MoodiesBridge(port=int(os.environ.get('PORT', 4123)) )
+    moodies_bridge = MoodiesBridge(port=4123)
     moodies_bridge.start()
 
 if __name__=='__main__':
